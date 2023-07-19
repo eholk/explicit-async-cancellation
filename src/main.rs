@@ -1,5 +1,4 @@
-#![feature(specialization)]
-#![allow(incomplete_features)]
+#![feature(generators, generator_trait)]
 
 #[macro_use]
 mod cancelable;
@@ -10,5 +9,4 @@ fn main() {
         println!("Hello, world!");
     });
 
-    println!("Hello, world!");
 }
