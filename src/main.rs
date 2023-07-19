@@ -4,6 +4,7 @@ use cancelable::{ready, Future};
 
 #[macro_use]
 mod cancelable;
+mod executor;
 mod iocp;
 
 fn main() {
@@ -11,4 +12,7 @@ fn main() {
         let world = awaitc!(ready("world"));
         println!("Hello, {world}!");
     });
+
+    let executor = executor::Executor::new(fut);
+    executor.run();    
 }

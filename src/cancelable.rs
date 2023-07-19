@@ -1,7 +1,7 @@
 use std::{
     pin::Pin,
     ptr::NonNull,
-    task::{Context, Poll},
+    task::{Context, Poll}, mem,
 };
 
 /// A version of core::future::Future that supports explicit cancellation
@@ -10,7 +10,7 @@ pub trait Future {
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output>;
 
-    fn poll_cancel(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+    fn poll_cancel(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<()> {
         // By default we preserve the existing cancellation behavior, which is that
         // we don't do anything and we let synchronous destructors do the cleanup.
         Poll::Ready(())
@@ -37,11 +37,19 @@ where
     type Output = O;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        todo!()
+        match self.resume(PollState { cx: unsafe {  mem::transmute(cx) }, is_cancelled: false }) {
+            std::ops::GeneratorState::Yielded(()) => Poll::Pending,
+            std::ops::GeneratorState::Complete(CancelState::Complete(v)) => Poll::Ready(v),
+            std::ops::GeneratorState::Complete(CancelState::Cancelled) => panic!("cancelled"),
+        }
     }
 
     fn poll_cancel(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
-        todo!()
+        match self.resume(PollState { cx: unsafe {  mem::transmute(cx) }, is_cancelled: true }) {
+            std::ops::GeneratorState::Yielded(()) => Poll::Pending,
+            std::ops::GeneratorState::Complete(CancelState::Complete(_)) => panic!("future completed after being cancelled"),
+            std::ops::GeneratorState::Complete(CancelState::Cancelled) => Poll::Ready(()),
+        }
     }
 }
 
@@ -131,7 +139,7 @@ pub fn ready<T>(t: T) -> impl Future<Output = T> {
     impl<T> Future for Ready<T> {
         type Output = T;
 
-        fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
             unsafe { Poll::Ready(self.get_unchecked_mut().0.take().unwrap()) }
         }
     }
