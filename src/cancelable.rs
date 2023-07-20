@@ -1,7 +1,8 @@
 use std::{
+    mem,
     pin::Pin,
     ptr::NonNull,
-    task::{Context, Poll}, mem,
+    task::{Context, Poll},
 };
 
 /// A version of core::future::Future that supports explicit cancellation
@@ -37,7 +38,10 @@ where
     type Output = O;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        match self.resume(PollState { cx: unsafe {  mem::transmute(cx) }, is_cancelled: false }) {
+        match self.resume(PollState {
+            cx: unsafe { mem::transmute(cx) },
+            is_cancelled: false,
+        }) {
             std::ops::GeneratorState::Yielded(()) => Poll::Pending,
             std::ops::GeneratorState::Complete(CancelState::Complete(v)) => Poll::Ready(v),
             std::ops::GeneratorState::Complete(CancelState::Cancelled) => panic!("cancelled"),
@@ -45,9 +49,14 @@ where
     }
 
     fn poll_cancel(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
-        match self.resume(PollState { cx: unsafe {  mem::transmute(cx) }, is_cancelled: true }) {
+        match self.resume(PollState {
+            cx: unsafe { mem::transmute(cx) },
+            is_cancelled: true,
+        }) {
             std::ops::GeneratorState::Yielded(()) => Poll::Pending,
-            std::ops::GeneratorState::Complete(CancelState::Complete(_)) => panic!("future completed after being cancelled"),
+            std::ops::GeneratorState::Complete(CancelState::Complete(_)) => {
+                panic!("future completed after being cancelled")
+            }
             std::ops::GeneratorState::Complete(CancelState::Cancelled) => Poll::Ready(()),
         }
     }
@@ -145,4 +154,55 @@ pub fn ready<T>(t: T) -> impl Future<Output = T> {
     }
 
     Ready(Some(t))
+}
+
+pub fn pending() -> impl Future<Output = !> {
+    struct Pending;
+
+    impl Future for Pending {
+        type Output = !;
+
+        fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+            Poll::Pending
+        }
+    }
+
+    Pending
+}
+
+pub trait FutureExt: Future {
+    fn on_cancel<H: FnOnce()>(self, hook: H) -> impl Future<Output = Self::Output>;
+}
+
+impl<F: Future> FutureExt for F {
+    fn on_cancel<H: FnOnce()>(self, hook: H) -> impl Future<Output = Self::Output> {
+        struct OnCancel<F, H> {
+            future: F,
+            hook: Option<H>,
+        }
+
+        impl<F, H> Future for OnCancel<F, H>
+        where
+            F: Future,
+            H: FnOnce(),
+        {
+            type Output = F::Output;
+
+            fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+                unsafe { self.map_unchecked_mut(|this| &mut this.future).poll(cx) }
+            }
+
+            fn poll_cancel(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<()> {
+                unsafe {
+                    self.get_unchecked_mut().hook.take().unwrap()();
+                }
+                Poll::Ready(())
+            }
+        }
+
+        OnCancel {
+            future: self,
+            hook: Some(hook),
+        }
+    }
 }
