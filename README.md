@@ -12,5 +12,4 @@ The following are things we'd still like to try out:
 
 * Cancellation during cancellation
 * Cancellation and panic
-* Race combinator
 * Leaf futures, like completion-based IO

@@ -5,6 +5,9 @@ use std::{
     task::{Context, Poll},
 };
 
+use futures::future::Either;
+use pin_project::pin_project;
+
 /// A version of core::future::Future that supports explicit cancellation
 pub trait Future {
     type Output;
@@ -172,6 +175,11 @@ pub fn pending() -> impl Future<Output = !> {
 
 pub trait FutureExt: Future {
     fn on_cancel<H: FnOnce()>(self, hook: H) -> impl Future<Output = Self::Output>;
+
+    fn race<Other: Future>(
+        self,
+        other: Other,
+    ) -> impl Future<Output = Either<Self::Output, Other::Output>>;
 }
 
 impl<F: Future> FutureExt for F {
@@ -192,17 +200,83 @@ impl<F: Future> FutureExt for F {
                 unsafe { self.map_unchecked_mut(|this| &mut this.future).poll(cx) }
             }
 
-            fn poll_cancel(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<()> {
+            fn poll_cancel(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
                 unsafe {
-                    self.get_unchecked_mut().hook.take().unwrap()();
+                    self.as_mut().get_unchecked_mut().hook.take().map(|f| f());
+                    self.map_unchecked_mut(|this| &mut this.future)
+                        .poll_cancel(cx)
                 }
-                Poll::Ready(())
             }
         }
 
         OnCancel {
             future: self,
             hook: Some(hook),
+        }
+    }
+
+    fn race<Other: Future>(
+        self,
+        other: Other,
+    ) -> impl Future<Output = Either<Self::Output, Other::Output>> {
+        #[pin_project]
+        struct Race<A: Future, B: Future> {
+            #[pin]
+            a: A,
+            a_result: Option<A::Output>,
+            #[pin]
+            b: B,
+            b_result: Option<B::Output>,
+        }
+
+        impl<A: Future, B: Future> Future for Race<A, B> {
+            type Output = Either<A::Output, B::Output>;
+
+            fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+                let mut this = self.project();
+                loop {
+                    match (&this.a_result, &this.b_result) {
+                        // neither is done so give both a chance to run
+                        (None, None) => match this.a.as_mut().poll(cx) {
+                            Poll::Ready(v) => {
+                                *this.a_result = Some(v);
+                            }
+                            Poll::Pending => match this.b.as_mut().poll(cx) {
+                                Poll::Ready(v) => {
+                                    *this.b_result = Some(v);
+                                }
+                                Poll::Pending => return Poll::Pending,
+                            },
+                        },
+                        // a is finished so cancel b
+                        (Some(_), None) => match this.b.poll_cancel(cx) {
+                            Poll::Ready(()) => {
+                                return Poll::Ready(Either::Left(this.a_result.take().unwrap()))
+                            }
+                            Poll::Pending => return Poll::Pending,
+                        },
+                        // b is finished so cancel a
+                        (None, Some(_)) => match this.a.poll_cancel(cx) {
+                            Poll::Ready(()) => {
+                                return Poll::Ready(Either::Right(this.b_result.take().unwrap()))
+                            }
+                            Poll::Pending => return Poll::Pending,
+                        },
+                        (Some(_), Some(_)) => panic!("wat"),
+                    }
+                }
+            }
+
+            fn poll_cancel(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<()> {
+                unimplemented!()
+            }
+        }
+
+        Race {
+            a: self,
+            a_result: None,
+            b: other,
+            b_result: None,
         }
     }
 }

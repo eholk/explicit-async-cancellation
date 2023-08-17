@@ -2,8 +2,11 @@
     generators,
     generator_trait,
     return_position_impl_trait_in_trait,
-    never_type
+    never_type,
+    let_chains
 )]
+
+use std::task::Poll;
 
 use cancelable::{ready, Future};
 
@@ -18,11 +21,19 @@ fn main() {
     let fut = async_cancel!({
         let world = awaitc!(ready("world"));
         println!("Hello, {world}!");
-        awaitc!(pending().on_cancel(|| println!("cancelled")));
+        awaitc!(pending()
+            .on_cancel(|| println!("cancelled"))
+            .race(async_cancel!({ 42 })));
     });
 
     let mut executor = executor::Executor::new(fut);
-    executor.poll();
-    executor.poll();
-    executor.poll();
+    let Poll::Pending = executor.poll() else {
+        return;
+    };
+    let Poll::Pending = executor.poll() else {
+        return;
+    };
+    let Poll::Pending = executor.poll() else {
+        return;
+    };
 }
