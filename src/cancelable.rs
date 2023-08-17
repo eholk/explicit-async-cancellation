@@ -280,3 +280,51 @@ impl<F: Future> FutureExt for F {
         }
     }
 }
+
+#[cfg(test)]
+mod test {
+    use crate::executor::Executor;
+
+    use super::*;
+
+    #[test]
+    fn exec_cancel() {
+        let mut cancelled = false;
+        {
+            let cancelled = &mut cancelled;
+            let mut exec = Executor::new(async_cancel!({
+                awaitc!(pending().on_cancel(|| *cancelled = true));
+            }));
+            let _ = exec.poll();
+        }
+        assert!(cancelled);
+    }
+
+    #[test]
+    fn race_cancel_a() {
+        let mut cancelled = false;
+        {
+            let cancelled = &mut cancelled;
+            let mut exec = Executor::new(async_cancel!({
+                awaitc!(async_cancel!({ 42 }).race(pending().on_cancel(|| *cancelled = true)));
+            }));
+            let _ = exec.poll();
+        }
+        assert!(cancelled);
+    }
+
+    #[test]
+    fn race_cancel_b() {
+        let mut cancelled = false;
+        {
+            let cancelled = &mut cancelled;
+            let mut exec = Executor::new(async_cancel!({
+                awaitc!(pending()
+                    .on_cancel(|| *cancelled = true)
+                    .race(async_cancel!({ 42 })));
+            }));
+            let _ = exec.poll();
+        }
+        assert!(cancelled);
+    }
+}
