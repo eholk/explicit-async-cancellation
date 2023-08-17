@@ -174,7 +174,7 @@ pub fn pending() -> impl Future<Output = !> {
 }
 
 pub trait FutureExt: Future {
-    fn on_cancel<H: FnOnce()>(self, hook: H) -> impl Future<Output = Self::Output>;
+    fn on_cancel<H: Future<Output = ()>>(self, hook: H) -> impl Future<Output = Self::Output>;
 
     fn race<Other: Future>(
         self,
@@ -183,29 +183,41 @@ pub trait FutureExt: Future {
 }
 
 impl<F: Future> FutureExt for F {
-    fn on_cancel<H: FnOnce()>(self, hook: H) -> impl Future<Output = Self::Output> {
+    fn on_cancel<H: Future<Output = ()>>(self, hook: H) -> impl Future<Output = Self::Output> {
+        #[pin_project]
         struct OnCancel<F, H> {
+            #[pin]
             future: F,
+            #[pin]
             hook: Option<H>,
         }
 
         impl<F, H> Future for OnCancel<F, H>
         where
             F: Future,
-            H: FnOnce(),
+            H: Future<Output = ()>,
         {
             type Output = F::Output;
 
             fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-                unsafe { self.map_unchecked_mut(|this| &mut this.future).poll(cx) }
+                self.project().future.as_mut().poll(cx)
             }
 
-            fn poll_cancel(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
-                unsafe {
-                    self.as_mut().get_unchecked_mut().hook.take().map(|f| f());
-                    self.map_unchecked_mut(|this| &mut this.future)
-                        .poll_cancel(cx)
+            fn poll_cancel(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+                let mut this = self.project();
+
+                // if our cancellation hook isn't completed, poll it
+                match this.hook.as_mut().as_pin_mut() {
+                    Some(hook) => match hook.poll(cx) {
+                        // SAFETY: we're not moving, just overwriting.
+                        Poll::Ready(()) => unsafe { *this.hook.get_unchecked_mut() = None },
+                        Poll::Pending => return Poll::Pending,
+                    },
+                    None => {}
                 }
+
+                // now cancel the inner future
+                this.future.as_mut().poll_cancel(cx)
             }
         }
 
@@ -324,7 +336,7 @@ mod test {
         {
             let cancelled = &mut cancelled;
             let mut exec = Executor::new(async_cancel!({
-                awaitc!(pending().on_cancel(|| *cancelled = true));
+                awaitc!(pending().on_cancel(async_cancel!({ *cancelled = true })));
             }));
             let _ = exec.poll();
         }
@@ -337,7 +349,8 @@ mod test {
         {
             let cancelled = &mut cancelled;
             let exec = Executor::new(async_cancel!({
-                awaitc!(async_cancel!({ 42 }).race(pending().on_cancel(|| *cancelled = true)))
+                awaitc!(async_cancel!({ 42 })
+                    .race(pending().on_cancel(async_cancel!({ *cancelled = true }))))
             }));
             let result = exec.run();
             assert!(matches!(result, Either::Left(42)));
@@ -352,7 +365,7 @@ mod test {
             let cancelled = &mut cancelled;
             let exec = Executor::new(async_cancel!({
                 awaitc!(pending()
-                    .on_cancel(|| *cancelled = true)
+                    .on_cancel(async_cancel!({ *cancelled = true }))
                     .race(async_cancel!({ 42 })))
             }));
             let result = exec.run();
@@ -370,8 +383,8 @@ mod test {
             let cancelled_b = &mut cancelled_b;
             let mut exec = Executor::new(async_cancel!({
                 awaitc!(pending()
-                    .on_cancel(|| *cancelled_a = true)
-                    .race(pending().on_cancel(|| *cancelled_b = true)));
+                    .on_cancel(async_cancel!({ *cancelled_a = true }))
+                    .race(pending().on_cancel(async_cancel!({ *cancelled_b = true }))));
             }));
             let _ = exec.poll();
             let _ = exec.poll();

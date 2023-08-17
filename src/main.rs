@@ -6,8 +6,6 @@
     let_chains
 )]
 
-use std::task::Poll;
-
 use cancelable::{ready, Future};
 
 use crate::cancelable::{pending, FutureExt};
@@ -22,18 +20,10 @@ fn main() {
         let world = awaitc!(ready("world"));
         println!("Hello, {world}!");
         awaitc!(pending()
-            .on_cancel(|| println!("cancelled"))
-            .race(async_cancel!({ 42 })));
+            .on_cancel(async_cancel!({ println!("cancelled") }))
+            .race(async_cancel!({ 42 })))
     });
 
-    let mut executor = executor::Executor::new(fut);
-    let Poll::Pending = executor.poll() else {
-        return;
-    };
-    let Poll::Pending = executor.poll() else {
-        return;
-    };
-    let Poll::Pending = executor.poll() else {
-        return;
-    };
+    let result = executor::Executor::new(fut).run();
+    println!("result: {:?}", result);
 }
