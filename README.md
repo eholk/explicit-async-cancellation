@@ -12,4 +12,6 @@ The following are things we'd still like to try out:
 
 * Cancellation during cancellation
 * Cancellation and panic
+  * This probably isn't meaningful without a way to spawn. Basically, we treat the executor as a TaskGroup and cancel all the other tasks if one fails.
 * Leaf futures, like completion-based IO
+* `.on_cancel()` should take a future.
