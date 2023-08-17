@@ -224,9 +224,11 @@ impl<F: Future> FutureExt for F {
             #[pin]
             a: A,
             a_result: Option<A::Output>,
+            a_cancelled: bool,
             #[pin]
             b: B,
             b_result: Option<B::Output>,
+            b_cancelled: bool,
         }
 
         impl<A: Future, B: Future> Future for Race<A, B> {
@@ -267,16 +269,45 @@ impl<F: Future> FutureExt for F {
                 }
             }
 
-            fn poll_cancel(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<()> {
-                unimplemented!()
+            fn poll_cancel(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+                assert!(matches!(self.a_result, None));
+                assert!(matches!(self.b_result, None));
+
+                let mut this = self.project();
+
+                if !*this.a_cancelled {
+                    match this.a.as_mut().poll_cancel(cx) {
+                        Poll::Ready(()) => {
+                            *this.a_cancelled = true;
+                        }
+                        Poll::Pending => {}
+                    }
+                }
+
+                if !*this.b_cancelled {
+                    match this.b.as_mut().poll_cancel(cx) {
+                        Poll::Ready(()) => {
+                            *this.b_cancelled = true;
+                        }
+                        Poll::Pending => {}
+                    }
+                }
+
+                if *this.a_cancelled && *this.b_cancelled {
+                    Poll::Ready(())
+                } else {
+                    Poll::Pending
+                }
             }
         }
 
         Race {
             a: self,
             a_result: None,
+            a_cancelled: false,
             b: other,
             b_result: None,
+            b_cancelled: false,
         }
     }
 }
@@ -305,10 +336,11 @@ mod test {
         let mut cancelled = false;
         {
             let cancelled = &mut cancelled;
-            let mut exec = Executor::new(async_cancel!({
-                awaitc!(async_cancel!({ 42 }).race(pending().on_cancel(|| *cancelled = true)));
+            let exec = Executor::new(async_cancel!({
+                awaitc!(async_cancel!({ 42 }).race(pending().on_cancel(|| *cancelled = true)))
             }));
-            let _ = exec.poll();
+            let result = exec.run();
+            assert!(matches!(result, Either::Left(42)));
         }
         assert!(cancelled);
     }
@@ -318,13 +350,34 @@ mod test {
         let mut cancelled = false;
         {
             let cancelled = &mut cancelled;
-            let mut exec = Executor::new(async_cancel!({
+            let exec = Executor::new(async_cancel!({
                 awaitc!(pending()
                     .on_cancel(|| *cancelled = true)
-                    .race(async_cancel!({ 42 })));
+                    .race(async_cancel!({ 42 })))
             }));
-            let _ = exec.poll();
+            let result = exec.run();
+            assert!(matches!(result, Either::Right(42)));
         }
         assert!(cancelled);
+    }
+
+    #[test]
+    fn race_cancel_both() {
+        let mut cancelled_a = false;
+        let mut cancelled_b = false;
+        {
+            let cancelled_a = &mut cancelled_a;
+            let cancelled_b = &mut cancelled_b;
+            let mut exec = Executor::new(async_cancel!({
+                awaitc!(pending()
+                    .on_cancel(|| *cancelled_a = true)
+                    .race(pending().on_cancel(|| *cancelled_b = true)));
+            }));
+            let _ = exec.poll();
+            let _ = exec.poll();
+            let _ = exec.poll();
+        }
+        assert!(cancelled_a);
+        assert!(cancelled_b);
     }
 }
