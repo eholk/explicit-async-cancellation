@@ -205,7 +205,6 @@ impl<F: Future> FutureExt for F {
 
             fn poll_cancel(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
                 let mut this = self.project();
-
                 // if our cancellation hook isn't completed, poll it
                 match this.hook.as_mut().as_pin_mut() {
                     Some(hook) => match hook.poll(cx) {
@@ -282,12 +281,9 @@ impl<F: Future> FutureExt for F {
             }
 
             fn poll_cancel(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
-                assert!(matches!(self.a_result, None));
-                assert!(matches!(self.b_result, None));
-
                 let mut this = self.project();
 
-                if !*this.a_cancelled {
+                if this.a_result.is_none() && !*this.a_cancelled {
                     match this.a.as_mut().poll_cancel(cx) {
                         Poll::Ready(()) => {
                             *this.a_cancelled = true;
@@ -296,7 +292,7 @@ impl<F: Future> FutureExt for F {
                     }
                 }
 
-                if !*this.b_cancelled {
+                if this.b_result.is_none() && !*this.b_cancelled {
                     match this.b.as_mut().poll_cancel(cx) {
                         Poll::Ready(()) => {
                             *this.b_cancelled = true;
@@ -305,7 +301,9 @@ impl<F: Future> FutureExt for F {
                     }
                 }
 
-                if *this.a_cancelled && *this.b_cancelled {
+                if (this.a_result.is_some() || *this.a_cancelled)
+                    && (this.b_result.is_some() || *this.b_cancelled)
+                {
                     Poll::Ready(())
                 } else {
                     Poll::Pending
@@ -392,5 +390,21 @@ mod test {
         }
         assert!(cancelled_a);
         assert!(cancelled_b);
+    }
+
+    #[test]
+    #[ignore] // This test stack overflows because we don't have reasonable behavior for cancelling a cancellation handler
+    fn cancel_cancel() {
+        let mut executor = Executor::new(async_cancel!({
+            awaitc!(
+                async_cancel!({ 42 }).race(pending().on_cancel(async_cancel!({
+                    awaitc!(pending());
+                })))
+            )
+        }));
+        let _ = executor.poll();
+        let _ = executor.poll();
+        let _ = executor.poll();
+        drop(executor);
     }
 }
