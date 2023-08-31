@@ -247,6 +247,8 @@ impl<F: Future> FutureExt for F {
 
             fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
                 let mut this = self.project();
+                debug_assert!(!*this.a_cancelled);
+                debug_assert!(!*this.b_cancelled);
                 loop {
                     match (&this.a_result, &this.b_result) {
                         // neither is done so give both a chance to run
@@ -264,14 +266,16 @@ impl<F: Future> FutureExt for F {
                         // a is finished so cancel b
                         (Some(_), None) => match this.b.poll_cancel(cx) {
                             Poll::Ready(()) => {
-                                return Poll::Ready(Either::Left(this.a_result.take().unwrap()))
+                                *this.b_cancelled = true;
+                                return Poll::Ready(Either::Left(this.a_result.take().unwrap()));
                             }
                             Poll::Pending => return Poll::Pending,
                         },
                         // b is finished so cancel a
                         (None, Some(_)) => match this.a.poll_cancel(cx) {
                             Poll::Ready(()) => {
-                                return Poll::Ready(Either::Right(this.b_result.take().unwrap()))
+                                *this.a_cancelled = true;
+                                return Poll::Ready(Either::Right(this.b_result.take().unwrap()));
                             }
                             Poll::Pending => return Poll::Pending,
                         },
@@ -322,8 +326,24 @@ impl<F: Future> FutureExt for F {
     }
 }
 
+pub fn poll_fn<T, F: FnMut(&mut Context<'_>) -> Poll<T>>(f: F) -> impl Future<Output = T> {
+    struct PollFn<T, F: FnMut(&mut Context<'_>) -> Poll<T>>(F);
+
+    impl<T, F: FnMut(&mut Context<'_>) -> Poll<T>> Future for PollFn<T, F> {
+        type Output = T;
+
+        fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+            (unsafe { self.get_unchecked_mut() }.0)(cx)
+        }
+    }
+
+    PollFn(f)
+}
+
 #[cfg(test)]
 mod test {
+    use std::cell::RefCell;
+
     use crate::executor::Executor;
 
     use super::*;
@@ -393,18 +413,65 @@ mod test {
     }
 
     #[test]
-    #[ignore] // This test stack overflows because we don't have reasonable behavior for cancelling a cancellation handler
-    fn cancel_cancel() {
-        let mut executor = Executor::new(async_cancel!({
-            awaitc!(
-                async_cancel!({ 42 }).race(pending().on_cancel(async_cancel!({
-                    awaitc!(pending());
+    fn cancel_while_canceling() {
+        let mut b_cancel_start = None;
+        let mut b_cancel_end = None;
+        let mut race_cancel_start = None;
+        let mut root_cancel_start = None;
+        {
+            let b_cancel_start = &mut b_cancel_start;
+            let b_cancel_end = &mut b_cancel_end;
+            let race_cancel_start = &mut race_cancel_start;
+            let root_cancel_start = &mut root_cancel_start;
+
+            let clock = &RefCell::new(0);
+            let done = &RefCell::new(false);
+
+            let tic = || {
+                let mut clock = clock.borrow_mut();
+                *clock += 1;
+                *clock - 1
+            };
+            let root = async_cancel!({
+                let a = async_cancel!({ 42 });
+                let b = pending().on_cancel(
+                    poll_fn(|_| {
+                        if b_cancel_start.is_none() {
+                            *b_cancel_start = Some(tic());
+                        }
+                        if *done.borrow() {
+                            *b_cancel_end = Some(tic());
+                            Poll::Ready(())
+                        } else {
+                            Poll::Pending
+                        }
+                    })
+                    .on_cancel(async_cancel!({
+                        panic!("cancelling the cancellation is not allowed")
+                    })),
+                );
+                awaitc!(a.race(b).on_cancel(async_cancel!({
+                    *race_cancel_start = Some(tic());
                 })))
-            )
-        }));
-        let _ = executor.poll();
-        let _ = executor.poll();
-        let _ = executor.poll();
-        drop(executor);
+            })
+            .on_cancel(async_cancel!({
+                *root_cancel_start = Some(tic());
+            }));
+            let mut executor = Executor::new(root);
+            let _ = executor.poll();
+            let _ = executor.poll();
+            let _ = executor.poll();
+            *done.borrow_mut() = true;
+        }
+
+        // B could start cancelling first.
+        assert!(b_cancel_start < race_cancel_start);
+        // we cancel outside-in, so the root cancels before the race
+        assert!(root_cancel_start < race_cancel_start);
+        // but b still starts cancelling before the root
+        assert!(b_cancel_start < root_cancel_start);
+        // but b doesn't finish cancelling until we've started cancelling everything else
+        // (i.e. we are in the executor's shutdown path)
+        assert!(b_cancel_end > root_cancel_start);
     }
 }
