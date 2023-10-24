@@ -1,7 +1,6 @@
 #![feature(
-    generators,
-    generator_trait,
-    return_position_impl_trait_in_trait,
+    coroutines,
+    coroutine_trait,
     never_type,
     let_chains
 )]

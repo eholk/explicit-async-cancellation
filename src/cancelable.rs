@@ -36,7 +36,7 @@ pub trait Future {
 
 impl<O, G> Future for G
 where
-    G: core::ops::Generator<PollState, Yield = (), Return = CancelState<O>>,
+    G: core::ops::Coroutine<PollState, Yield = (), Return = CancelState<O>>,
 {
     type Output = O;
 
@@ -45,9 +45,9 @@ where
             cx: unsafe { mem::transmute(cx) },
             is_cancelled: false,
         }) {
-            std::ops::GeneratorState::Yielded(()) => Poll::Pending,
-            std::ops::GeneratorState::Complete(CancelState::Complete(v)) => Poll::Ready(v),
-            std::ops::GeneratorState::Complete(CancelState::Cancelled) => panic!("cancelled"),
+            std::ops::CoroutineState::Yielded(()) => Poll::Pending,
+            std::ops::CoroutineState::Complete(CancelState::Complete(v)) => Poll::Ready(v),
+            std::ops::CoroutineState::Complete(CancelState::Cancelled) => panic!("cancelled"),
         }
     }
 
@@ -56,11 +56,11 @@ where
             cx: unsafe { mem::transmute(cx) },
             is_cancelled: true,
         }) {
-            std::ops::GeneratorState::Yielded(()) => Poll::Pending,
-            std::ops::GeneratorState::Complete(CancelState::Complete(_)) => {
+            std::ops::CoroutineState::Yielded(()) => Poll::Pending,
+            std::ops::CoroutineState::Complete(CancelState::Complete(_)) => {
                 panic!("future completed after being cancelled")
             }
-            std::ops::GeneratorState::Complete(CancelState::Cancelled) => Poll::Ready(()),
+            std::ops::CoroutineState::Complete(CancelState::Cancelled) => Poll::Ready(()),
         }
     }
 }
@@ -70,23 +70,23 @@ pub enum CancelState<T> {
     Cancelled,
 }
 
-pub fn future_from_generator<O, G>(gen: G) -> impl Future<Output = O>
+pub fn future_from_coroutine<O, G>(gen: G) -> impl Future<Output = O>
 where
-    G: core::ops::Generator<PollState, Yield = (), Return = CancelState<O>>,
+    G: core::ops::Coroutine<PollState, Yield = (), Return = CancelState<O>>,
 {
     gen
 }
 
 macro_rules! async_cancel {
     ($body:block) => {
-        $crate::cancelable::future_from_generator(
+        $crate::cancelable::future_from_coroutine(
             #[allow(unreachable_code)]
             static move |poll_state: $crate::cancelable::PollState| {
                 unsafe {
                     $crate::cancelable::save_poll_state(poll_state);
                 }
                 return $crate::cancelable::CancelState::Complete($body);
-                // Add a yield to force this to be a generator
+                // Add a yield to force this to be a Coroutine
                 yield;
             },
         )
