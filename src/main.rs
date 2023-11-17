@@ -17,7 +17,6 @@ use crate::{
 #[macro_use]
 mod cancelable;
 mod executor;
-mod iocp;
 
 fn main() {
     let done = &RefCell::new(false);
