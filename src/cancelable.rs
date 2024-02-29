@@ -173,16 +173,7 @@ pub fn pending() -> impl Future<Output = !> {
     Pending
 }
 
-pub trait FutureExt: Future {
-    fn on_cancel<H: Future<Output = ()>>(self, hook: H) -> impl Future<Output = Self::Output>;
-
-    fn race<Other: Future>(
-        self,
-        other: Other,
-    ) -> impl Future<Output = Either<Self::Output, Other::Output>>;
-}
-
-impl<F: Future> FutureExt for F {
+pub trait FutureExt: Future + Sized {
     fn on_cancel<H: Future<Output = ()>>(self, hook: H) -> impl Future<Output = Self::Output> {
         #[pin_project]
         struct OnCancel<F, H> {
@@ -325,6 +316,8 @@ impl<F: Future> FutureExt for F {
         }
     }
 }
+
+impl<F: Future> FutureExt for F {}
 
 pub fn poll_fn<T, F: FnMut(&mut Context<'_>) -> Poll<T>>(f: F) -> impl Future<Output = T> {
     struct PollFn<T, F: FnMut(&mut Context<'_>) -> Poll<T>>(F);
