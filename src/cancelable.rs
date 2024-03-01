@@ -1,5 +1,7 @@
 use std::{
+    any::Any,
     mem,
+    panic::{catch_unwind, resume_unwind, AssertUnwindSafe, UnwindSafe},
     pin::Pin,
     ptr::NonNull,
     task::{Context, Poll},
@@ -186,7 +188,11 @@ pub trait FutureExt: Future + Sized {
             future: F,
             #[pin]
             hook: Option<H>,
+            poison: bool,
+            panic: Option<Box<dyn Any + Send + 'static>>,
         }
+
+        impl<F, H> UnwindSafe for OnCancel<F, H> {}
 
         impl<F, H> Future for OnCancel<F, H>
         where
@@ -196,11 +202,53 @@ pub trait FutureExt: Future + Sized {
             type Output = F::Output;
 
             fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-                self.project().future.as_mut().poll(cx)
+                let mut this = self.project();
+
+                loop {
+                    if this.panic.is_some() {
+                        match this.hook.as_mut().as_pin_mut() {
+                            Some(hook) => match hook.poll(cx) {
+                                // SAFETY: we're not moving, just overwriting.
+                                Poll::Ready(()) => unsafe { *this.hook.get_unchecked_mut() = None },
+                                Poll::Pending => return Poll::Pending,
+                            },
+                            None => {}
+                        };
+
+                        resume_unwind(this.panic.take().unwrap())
+                    }
+
+                    assert!(!*this.poison, "polling a poisoned future");
+
+                    match catch_unwind(AssertUnwindSafe(|| {
+                        *this.poison = true;
+                        let poll = this.future.as_mut().poll(cx);
+                        *this.poison = false;
+                        poll
+                    })) {
+                        Ok(poll) => break poll,
+                        Err(e) => {
+                            *this.panic = Some(e);
+                            // since we panicked while polling the inner future, we should still be poisoned
+                            debug_assert!(*this.poison);
+                        }
+                    }
+                }
             }
 
             fn poll_cancel(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
                 let mut this = self.project();
+
+                // cancel the inner future
+                if !*this.poison {
+                    match this.future.as_mut().poll_cancel(cx) {
+                        // Since we're done cancelling the inner future, poison
+                        // ourselves so we don't try and do it again.
+                        Poll::Ready(()) => *this.poison = true,
+                        Poll::Pending => return Poll::Pending,
+                    };
+                }
+
                 // if our cancellation hook isn't completed, poll it
                 match this.hook.as_mut().as_pin_mut() {
                     Some(hook) => match hook.poll(cx) {
@@ -209,16 +257,17 @@ pub trait FutureExt: Future + Sized {
                         Poll::Pending => return Poll::Pending,
                     },
                     None => {}
-                }
+                };
 
-                // now cancel the inner future
-                this.future.as_mut().poll_cancel(cx)
+                Poll::Ready(())
             }
         }
 
         OnCancel {
             future: self,
             hook: Some(hook),
+            poison: false,
+            panic: None,
         }
     }
 
@@ -451,26 +500,21 @@ mod test {
                 awaitc!(a.race(b).on_cancel(async_cancel!({
                     *race_cancel_start = Some(tic());
                 })))
-            })
-            .on_cancel(async_cancel!({
-                *root_cancel_start = Some(tic());
-            }));
+            });
             let mut executor = Executor::new(root);
             let _ = executor.poll();
             let _ = executor.poll();
             let _ = executor.poll();
+            *root_cancel_start = Some(tic());
             *done.borrow_mut() = true;
         }
 
         // B could start cancelling first.
         assert!(b_cancel_start < race_cancel_start);
-        // we cancel outside-in, so the root cancels before the race
         assert!(root_cancel_start < race_cancel_start);
-        // but b still starts cancelling before the root
-        assert!(b_cancel_start < root_cancel_start);
         // but b doesn't finish cancelling until we've started cancelling everything else
         // (i.e. we are in the executor's shutdown path)
-        assert!(b_cancel_end > root_cancel_start);
+        assert!(root_cancel_start < b_cancel_end);
     }
 
     #[test]
