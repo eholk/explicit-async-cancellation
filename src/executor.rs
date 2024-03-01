@@ -1,4 +1,8 @@
-use std::{pin::Pin, task::Poll};
+use std::{
+    panic::{self, catch_unwind, UnwindSafe},
+    pin::Pin,
+    task::Poll,
+};
 
 use crate::cancelable::Future;
 
@@ -19,9 +23,14 @@ impl<F: Future> Executor<F> {
     }
 
     pub fn poll(&mut self) -> Poll<F::Output> {
+        // we temporarily remove the root task so that if it panics we don't try
+        // to resume it.
+        let mut task = self.task.take();
         let mut cx = std::task::Context::from_waker(futures::task::noop_waker_ref());
+        let poll = task.as_mut().unwrap().as_mut().poll(&mut cx);
+        self.task = task;
 
-        match self.task.as_mut().unwrap().as_mut().poll(&mut cx) {
+        match poll {
             Poll::Ready(v) => {
                 self.complete = true;
                 Poll::Ready(v)
@@ -41,7 +50,9 @@ impl<F: Future> Executor<F> {
 
 impl<F: Future> Drop for Executor<F> {
     fn drop(&mut self) {
-        if !self.complete && let Some(mut task) = self.task.take() {
+        if !self.complete
+            && let Some(mut task) = self.task.take()
+        {
             let mut cx = std::task::Context::from_waker(futures::task::noop_waker_ref());
 
             while let Poll::Pending = task.as_mut().poll_cancel(&mut cx) {}

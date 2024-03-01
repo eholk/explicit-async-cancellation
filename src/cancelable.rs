@@ -174,6 +174,11 @@ pub fn pending() -> impl Future<Output = !> {
 }
 
 pub trait FutureExt: Future + Sized {
+    /// Adds a handler to be run when a future is cancelled
+    ///
+    /// This is primarily for testing and demonstrating cancellation behavior,
+    /// rather than something that's meant to be the normal way to handle
+    /// cancellation.
     fn on_cancel<H: Future<Output = ()>>(self, hook: H) -> impl Future<Output = Self::Output> {
         #[pin_project]
         struct OnCancel<F, H> {
@@ -335,7 +340,7 @@ pub fn poll_fn<T, F: FnMut(&mut Context<'_>) -> Poll<T>>(f: F) -> impl Future<Ou
 
 #[cfg(test)]
 mod test {
-    use std::cell::RefCell;
+    use std::{cell::RefCell, panic::catch_unwind, sync::atomic::AtomicBool};
 
     use crate::executor::Executor;
 
@@ -466,5 +471,22 @@ mod test {
         // but b doesn't finish cancelling until we've started cancelling everything else
         // (i.e. we are in the executor's shutdown path)
         assert!(b_cancel_end > root_cancel_start);
+    }
+
+    #[test]
+    fn cancel_while_unwinding() {
+        let did_cancel = AtomicBool::new(false);
+        let did_cancel = &did_cancel;
+
+        let exec = Executor::new(async_cancel!({ panic!("expected panic") }).on_cancel(
+            async_cancel!({
+                did_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+            }),
+        ));
+
+        let result = catch_unwind(|| exec.run());
+
+        assert!(result.is_err());
+        assert!(did_cancel.load(std::sync::atomic::Ordering::Relaxed));
     }
 }
