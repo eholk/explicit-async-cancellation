@@ -182,12 +182,10 @@ pub trait FutureExt: Future + Sized {
     /// rather than something that's meant to be the normal way to handle
     /// cancellation.
     fn on_cancel<H: Future<Output = ()>>(self, hook: H) -> impl Future<Output = Self::Output> {
-        #[pin_project]
         struct OnCancel<F, H> {
-            #[pin]
             future: F,
-            #[pin]
             hook: Option<H>,
+            /// Indicates that `future` might be in an inconsistent state and should not be touched.
             poison: bool,
             panic: Option<Box<dyn Any + Send + 'static>>,
         }
@@ -201,65 +199,93 @@ pub trait FutureExt: Future + Sized {
         {
             type Output = F::Output;
 
-            fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-                let mut this = self.project();
-
+            fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
                 loop {
-                    if this.panic.is_some() {
-                        match this.hook.as_mut().as_pin_mut() {
-                            Some(hook) => match hook.poll(cx) {
+                    if self.as_mut().panic().is_some() {
+                        match self.as_mut().hook().as_mut() {
+                            Some(hook) => match hook.as_mut().poll(cx) {
                                 // SAFETY: we're not moving, just overwriting.
-                                Poll::Ready(()) => unsafe { *this.hook.get_unchecked_mut() = None },
+                                Poll::Ready(()) => self.as_mut().clear_hook(),
                                 Poll::Pending => return Poll::Pending,
                             },
                             None => {}
                         };
 
-                        resume_unwind(this.panic.take().unwrap())
+                        resume_unwind(self.as_mut().panic().take().unwrap())
                     }
 
-                    assert!(!*this.poison, "polling a poisoned future");
+                    assert!(!*self.as_mut().poison(), "polling a poisoned future");
 
                     match catch_unwind(AssertUnwindSafe(|| {
-                        *this.poison = true;
-                        let poll = this.future.as_mut().poll(cx);
-                        *this.poison = false;
+                        *self.as_mut().poison() = true;
+                        let poll = self.as_mut().future().poll(cx);
+                        *self.as_mut().poison() = false;
                         poll
                     })) {
                         Ok(poll) => break poll,
                         Err(e) => {
-                            *this.panic = Some(e);
+                            *self.as_mut().panic() = Some(e);
                             // since we panicked while polling the inner future, we should still be poisoned
-                            debug_assert!(*this.poison);
+                            debug_assert!(*self.as_mut().poison());
                         }
                     }
                 }
             }
 
-            fn poll_cancel(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
-                let mut this = self.project();
-
+            fn poll_cancel(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
                 // cancel the inner future
-                if !*this.poison {
-                    match this.future.as_mut().poll_cancel(cx) {
+                if !*self.as_mut().poison() {
+                    match self.as_mut().future().poll_cancel(cx) {
                         // Since we're done cancelling the inner future, poison
                         // ourselves so we don't try and do it again.
-                        Poll::Ready(()) => *this.poison = true,
+                        Poll::Ready(()) => *self.as_mut().poison() = true,
                         Poll::Pending => return Poll::Pending,
                     };
                 }
 
                 // if our cancellation hook isn't completed, poll it
-                match this.hook.as_mut().as_pin_mut() {
+                match self.as_mut().hook() {
                     Some(hook) => match hook.poll(cx) {
-                        // SAFETY: we're not moving, just overwriting.
-                        Poll::Ready(()) => unsafe { *this.hook.get_unchecked_mut() = None },
+                        Poll::Ready(()) => self.clear_hook(),
                         Poll::Pending => return Poll::Pending,
                     },
                     None => {}
                 };
 
                 Poll::Ready(())
+            }
+        }
+
+        // lots of accessors to hide all the unsafe code in `poll` and `poll_cancel`
+        impl<F, H> OnCancel<F, H> {
+            fn poison(self: Pin<&mut Self>) -> &mut bool {
+                // SAFETY: pin projection
+                unsafe { &mut self.get_unchecked_mut().poison }
+            }
+
+            fn panic(self: Pin<&mut Self>) -> &mut Option<Box<dyn Any + Send + 'static>> {
+                // SAFETY: pin projection
+                unsafe { &mut self.get_unchecked_mut().panic }
+            }
+
+            fn future(self: Pin<&mut Self>) -> Pin<&mut F> {
+                // SAFETY: pin projection
+                unsafe { self.map_unchecked_mut(|s| &mut s.future) }
+            }
+
+            fn hook(self: Pin<&mut Self>) -> Option<Pin<&mut H>> {
+                // SAFETY: pin projection
+                unsafe {
+                    self.get_unchecked_mut()
+                        .hook
+                        .as_mut()
+                        .map(|hook| Pin::new_unchecked(hook))
+                }
+            }
+
+            fn clear_hook(self: Pin<&mut Self>) {
+                // SAFETY: overwriting, not moving
+                unsafe { self.get_unchecked_mut().hook = None }
             }
         }
 
