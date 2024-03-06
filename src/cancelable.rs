@@ -200,34 +200,28 @@ pub trait FutureExt: Future + Sized {
             type Output = F::Output;
 
             fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-                loop {
-                    if self.as_mut().panic().is_some() {
-                        match self.as_mut().hook().as_mut() {
-                            Some(hook) => match hook.as_mut().poll(cx) {
-                                // SAFETY: we're not moving, just overwriting.
-                                Poll::Ready(()) => self.as_mut().clear_hook(),
-                                Poll::Pending => return Poll::Pending,
-                            },
-                            None => {}
-                        };
+                if self.as_mut().panic().is_some() {
+                    match self.as_mut().poll_cancel(cx) {
+                        Poll::Ready(()) => resume_unwind(self.as_mut().panic().take().unwrap()),
+                        Poll::Pending => return Poll::Pending,
+                    };
+                }
 
-                        resume_unwind(self.as_mut().panic().take().unwrap())
-                    }
+                assert!(!*self.as_mut().poison(), "polling a poisoned future");
 
-                    assert!(!*self.as_mut().poison(), "polling a poisoned future");
-
-                    match catch_unwind(AssertUnwindSafe(|| {
-                        *self.as_mut().poison() = true;
-                        let poll = self.as_mut().future().poll(cx);
-                        *self.as_mut().poison() = false;
-                        poll
-                    })) {
-                        Ok(poll) => break poll,
-                        Err(e) => {
-                            *self.as_mut().panic() = Some(e);
-                            // since we panicked while polling the inner future, we should still be poisoned
-                            debug_assert!(*self.as_mut().poison());
-                        }
+                match catch_unwind(AssertUnwindSafe(|| {
+                    *self.as_mut().poison() = true;
+                    let poll = self.as_mut().future().poll(cx);
+                    *self.as_mut().poison() = false;
+                    poll
+                })) {
+                    Ok(poll) => poll,
+                    Err(e) => {
+                        *self.as_mut().panic() = Some(e);
+                        // since we panicked while polling the inner future, we should still be poisoned
+                        debug_assert!(*self.as_mut().poison());
+                        // poll ourselves again since we don't have a value we can return yet
+                        self.poll(cx)
                     }
                 }
             }
@@ -415,7 +409,7 @@ pub fn poll_fn<T, F: FnMut(&mut Context<'_>) -> Poll<T>>(f: F) -> impl Future<Ou
 
 #[cfg(test)]
 mod test {
-    use std::{cell::RefCell, panic::catch_unwind, sync::atomic::AtomicBool};
+    use std::{cell::RefCell, sync::atomic::AtomicBool};
 
     use crate::executor::Executor;
 
