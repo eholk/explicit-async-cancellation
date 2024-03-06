@@ -227,6 +227,15 @@ pub trait FutureExt: Future + Sized {
             }
 
             fn poll_cancel(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+                // if our cancellation hook isn't completed, poll it
+                match self.as_mut().hook() {
+                    Some(hook) => match hook.poll(cx) {
+                        Poll::Ready(()) => self.as_mut().clear_hook(),
+                        Poll::Pending => return Poll::Pending,
+                    },
+                    None => {}
+                };
+                
                 // cancel the inner future
                 if !*self.as_mut().poison() {
                     match self.as_mut().future().poll_cancel(cx) {
@@ -236,15 +245,6 @@ pub trait FutureExt: Future + Sized {
                         Poll::Pending => return Poll::Pending,
                     };
                 }
-
-                // if our cancellation hook isn't completed, poll it
-                match self.as_mut().hook() {
-                    Some(hook) => match hook.poll(cx) {
-                        Poll::Ready(()) => self.clear_hook(),
-                        Poll::Pending => return Poll::Pending,
-                    },
-                    None => {}
-                };
 
                 Poll::Ready(())
             }
