@@ -185,8 +185,6 @@ pub trait FutureExt: Future + Sized {
         struct OnCancel<F, H> {
             future: F,
             hook: Option<H>,
-            /// Indicates that `future` might be in an inconsistent state and should not be touched.
-            poison: bool,
             panic: Option<Box<dyn Any + Send + 'static>>,
         }
 
@@ -207,19 +205,10 @@ pub trait FutureExt: Future + Sized {
                     };
                 }
 
-                assert!(!*self.as_mut().poison(), "polling a poisoned future");
-
-                match catch_unwind(AssertUnwindSafe(|| {
-                    *self.as_mut().poison() = true;
-                    let poll = self.as_mut().future().poll(cx);
-                    *self.as_mut().poison() = false;
-                    poll
-                })) {
+                match catch_unwind(AssertUnwindSafe(|| self.as_mut().future().poll(cx))) {
                     Ok(poll) => poll,
                     Err(e) => {
                         *self.as_mut().panic() = Some(e);
-                        // since we panicked while polling the inner future, we should still be poisoned
-                        debug_assert!(*self.as_mut().poison());
                         // poll ourselves again since we don't have a value we can return yet
                         self.poll(cx)
                     }
@@ -235,28 +224,18 @@ pub trait FutureExt: Future + Sized {
                     },
                     None => {}
                 };
-                
-                // cancel the inner future
-                if !*self.as_mut().poison() {
-                    match self.as_mut().future().poll_cancel(cx) {
-                        // Since we're done cancelling the inner future, poison
-                        // ourselves so we don't try and do it again.
-                        Poll::Ready(()) => *self.as_mut().poison() = true,
-                        Poll::Pending => return Poll::Pending,
-                    };
-                }
 
-                Poll::Ready(())
+                // cancel the inner future if not panicking
+                if self.as_mut().panic().is_none() {
+                    self.future().poll_cancel(cx)
+                } else {
+                    Poll::Ready(())
+                }
             }
         }
 
         // lots of accessors to hide all the unsafe code in `poll` and `poll_cancel`
         impl<F, H> OnCancel<F, H> {
-            fn poison(self: Pin<&mut Self>) -> &mut bool {
-                // SAFETY: pin projection
-                unsafe { &mut self.get_unchecked_mut().poison }
-            }
-
             fn panic(self: Pin<&mut Self>) -> &mut Option<Box<dyn Any + Send + 'static>> {
                 // SAFETY: pin projection
                 unsafe { &mut self.get_unchecked_mut().panic }
@@ -286,7 +265,6 @@ pub trait FutureExt: Future + Sized {
         OnCancel {
             future: self,
             hook: Some(hook),
-            poison: false,
             panic: None,
         }
     }
