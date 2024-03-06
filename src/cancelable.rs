@@ -202,7 +202,7 @@ pub trait FutureExt: Future + Sized {
             fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
                 if self.as_mut().panic().is_some() {
                     match self.as_mut().poll_cancel(cx) {
-                        Poll::Ready(()) => resume_unwind(self.as_mut().panic().take().unwrap()),
+                        Poll::Ready(()) => resume_unwind(self.panic().take().unwrap()),
                         Poll::Pending => return Poll::Pending,
                     };
                 }
