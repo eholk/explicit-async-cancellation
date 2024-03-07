@@ -226,10 +226,9 @@ pub trait FutureExt: Future + Sized {
                 };
 
                 // cancel the inner future if not panicking
-                if self.as_mut().panic().is_none() {
-                    self.future().poll_cancel(cx)
-                } else {
-                    Poll::Ready(())
+                match self.as_mut().panic() {
+                    None => self.future().poll_cancel(cx),
+                    Some(_) => resume_unwind(self.panic().take().unwrap()),
                 }
             }
         }
